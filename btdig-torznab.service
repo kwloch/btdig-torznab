@@ -1,0 +1,18 @@
+[Unit]
+Description=BTDig Torznab bridge
+After=network.target
+
+[Service]
+Type=simple
+User=btdig-torznab
+Group=btdig-torznab
+ExecStart=/opt/btdig-torznab/btdig_torznab.py
+WorkingDirectory=/opt/btdig-torznab
+Restart=on-failure
+RestartSec=5
+Environment=BTDIG_HOST=0.0.0.0
+Environment=BTDIG_PORT=5555
+Environment=BTDIG_CACHE_TTL=300
+
+[Install]
+WantedBy=multi-user.target
