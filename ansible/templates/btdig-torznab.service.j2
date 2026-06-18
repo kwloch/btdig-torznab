@@ -1,0 +1,18 @@
+[Unit]
+Description=btdig-torznab – Torznab API proxy for btdig
+After=network.target
+
+[Service]
+Type=simple
+User=btdig-torznab
+Group=btdig-torznab
+WorkingDirectory=/opt/btdig-torznab
+ExecStart=/opt/btdig-torznab/btdig_torznab.py
+Restart=on-failure
+RestartSec=5
+Environment=BTDIG_HOST={{ BTDIG_HOST | default('0.0.0.0') }}
+Environment=BTDIG_PORT={{ BTDIG_PORT | default('5555') }}
+Environment=BTDIG_CACHE_TTL={{ BTDIG_CACHE_TTL | default('300') }}
+
+[Install]
+WantedBy=multi-user.target
