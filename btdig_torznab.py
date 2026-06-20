@@ -30,6 +30,15 @@ PORT = int(os.environ.get("BTDIG_PORT", "5555"))
 BTDIG_URL = os.environ.get("BTDIG_URL", "https://btdig.com")
 CACHE_TTL = int(os.environ.get("BTDIG_CACHE_TTL", "300"))  # seconds
 
+# Torznab category to use per search type
+CAT_MAP = {
+    "search": "1000",  # Other
+    "tv-search": "5000",  # TV
+    "movie": "2000",  # Movies
+    "music": "3000",  # Audio
+    "book": "4000",  # Books
+}
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -61,9 +70,9 @@ class BTDigParser(html.parser.HTMLParser):
         self._reset()
 
     def _reset(self):
-        self._in_result = False       # inside a div.one_result
+        self._in_result = False
         self._result_depth = 0
-        self._in_title_a = False      # directly inside the torrent name <a>
+        self._in_title_a = False
         self._in_size_span = False
         self._in_age_span = False
         self._cur = {}
@@ -78,13 +87,8 @@ class BTDigParser(html.parser.HTMLParser):
                 self._reset()
                 self._in_result = True
                 self._result_depth = 1
-                self._cur = {
-                    "title": "",
-                    "magnet": "",
-                    "size_text": "",
-                    "age_text": "",
-                    "details_url": "",
-                }
+                self._cur = {"title": "", "magnet": "", "size_text": "",
+                             "age_text": "", "details_url": ""}
             return
 
         self._result_depth += 1
@@ -97,14 +101,13 @@ class BTDigParser(html.parser.HTMLParser):
                 self._cur["details_url"] = href
 
         if cls == "torrent_name":
-            self._in_title_a = False  # wait for the <a> inside
+            self._in_title_a = False
             self._title_a_depth = self._result_depth
         elif cls == "torrent_size":
             self._in_size_span = True
         elif cls == "torrent_age":
             self._in_age_span = True
 
-        # The actual title text is in the <a> inside .torrent_name
         if tag == "a" and self._title_a_depth > 0:
             self._in_title_a = True
 
@@ -121,18 +124,13 @@ class BTDigParser(html.parser.HTMLParser):
     def handle_endtag(self, tag):
         if not self._in_result:
             return
-
         self._result_depth -= 1
-
         if tag == "a" and self._in_title_a:
             self._in_title_a = False
             self._title_a_depth = 0
-
         if tag == "div" and self._result_depth <= 0:
             self._finalize()
             self._in_result = False
-
-        # Clear span flags on any closing tag
         if tag == "span":
             self._in_size_span = False
             self._in_age_span = False
@@ -140,22 +138,13 @@ class BTDigParser(html.parser.HTMLParser):
     def _finalize(self):
         c = self._cur
         if not c.get("magnet") or not c.get("title"):
-            return  # skip incomplete
-
+            return
         size = self._parse_size(c.get("size_text", ""))
         pub_date = self._parse_age(c.get("age_text", ""))
-
         self.results.append(TorrentResult(
-            title=c["title"],
-            magnet=c["magnet"],
-            size_bytes=size,
-            details_url=c.get("details_url", ""),
-            pub_date=pub_date,
-        ))
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+            title=c["title"], magnet=c["magnet"],
+            size_bytes=size, details_url=c.get("details_url", ""),
+            pub_date=pub_date))
 
     @staticmethod
     def _parse_size(text: str) -> int:
@@ -213,18 +202,18 @@ class BTDigScraper:
         self._last_request = 0.0
         self._lock = threading.Lock()
 
-    def search(self, query: str) -> str:
-        key = query.strip().lower()
+    def search(self, query: str, cat: str = "1000") -> str:
+        key = f"{query.strip().lower()}|{cat}"
         with self._lock:
             c = self._cache.get(key)
             if c and time.time() < c.expiry:
                 return c.xml
-        xml = self._fetch(query)
+        xml = self._fetch(query, cat)
         with self._lock:
             self._cache[key] = _Cached(xml, time.time() + CACHE_TTL)
         return xml
 
-    def _fetch(self, query: str) -> str:
+    def _fetch(self, query: str, cat: str = "1000") -> str:
         self._rate_limit()
         url = f"{BTDIG_URL}/search?q={urllib.parse.quote(query)}&order=0"
         req = urllib.request.Request(url, headers={"User-Agent": self.USER_AGENT})
@@ -240,7 +229,7 @@ class BTDigScraper:
         except Exception as e:
             return self._error_xml(f"Parse error: {e}")
 
-        return self._rss(p.results, query)
+        return self._rss(p.results, cat)
 
     def _rate_limit(self):
         e = time.time() - self._last_request
@@ -252,7 +241,7 @@ class BTDigScraper:
     # RSS / Torznab builders
     # ------------------------------------------------------------------
 
-    def _rss(self, results: list[TorrentResult], _query: str) -> str:
+    def _rss(self, results: list[TorrentResult], cat: str = "1000") -> str:
         NS = "http://torznab.com/schemas/2015/feed"
         rss = ET.Element("rss", version="2.0",
                          attrib={"xmlns:atom": "http://www.w3.org/2005/Atom",
@@ -275,7 +264,8 @@ class BTDigScraper:
                 f"Size: {self._human_size(r.size_bytes)} | "
                 f"Magnet: {r.magnet[:60]}...")
 
-            for name, val in [("category", "2000"), ("size", str(r.size_bytes)),
+            for name, val in [("category", cat),
+                              ("size", str(r.size_bytes)),
                               ("seeders", str(r.seeders)),
                               ("peers", str(r.seeders + r.leechers))]:
                 ET.SubElement(item, f"{{{NS}}}attr", name=name, value=val)
@@ -294,11 +284,27 @@ class BTDigScraper:
         ET.SubElement(serv, "limits", max="100", default="25")
         src = ET.SubElement(root, "searching")
         for t in ("search", "tv-search", "movie-search", "music-search",
-                  "book-search"):
+                  "book-search", "audio-search"):
             ET.SubElement(src, t, available="yes", supportedParams="q")
         cats = ET.SubElement(root, "categories")
-        c = ET.SubElement(cats, "category", id="2000", name="Other")
-        ET.SubElement(c, "subcat", id="2010", name="Other")
+        # TV (Sonarr)
+        c = ET.SubElement(cats, "category", id="5000", name="TV")
+        ET.SubElement(c, "subcat", id="5030", name="TV/HD")
+        # Movies (Radarr)
+        c = ET.SubElement(cats, "category", id="2000", name="Movies")
+        ET.SubElement(c, "subcat", id="2030", name="Movies/HD")
+        # Audio / Music
+        c = ET.SubElement(cats, "category", id="3000", name="Audio")
+        ET.SubElement(c, "subcat", id="3010", name="Audio/MP3")
+        # Books
+        c = ET.SubElement(cats, "category", id="7000", name="Books")
+        ET.SubElement(c, "subcat", id="7010", name="Books/EBook")
+        # XXX
+        c = ET.SubElement(cats, "category", id="6000", name="XXX")
+        ET.SubElement(c, "subcat", id="6010", name="XXX/Video")
+        # Other
+        c = ET.SubElement(cats, "category", id="1000", name="Other")
+        ET.SubElement(c, "subcat", id="1010", name="Other")
         return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
     @staticmethod
@@ -343,10 +349,15 @@ class TorznabHandler(http.server.BaseHTTPRequestHandler):
 
         if t in ("search", "tvsearch", "movie", "music", "book"):
             q = params.get("q", [""])[0].strip()
+            # Map search type to Torznab category
+            cat = {"tvsearch": "5000", "movie": "2000",
+                   "music": "3000", "book": "4000",
+                   "audio": "3000", "xxx": "6000",
+                   "search": "1000"}.get(t, "1000")
             if not q:
-                # Return recent/popular results for Prowlarr test
-                return self._send(self._scraper.search("2026"))
-            return self._send(self._scraper.search(q))
+                # Empty query = fallback so Prowlarr test passes
+                return self._send(self._scraper.search("2026", cat))
+            return self._send(self._scraper.search(q, cat))
 
         return self._send(self._scraper._error_xml(f"Unknown t={t}"))
 
